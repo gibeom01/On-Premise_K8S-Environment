@@ -1,0 +1,15 @@
+apiVersion: v2
+name: noblesys-monitoring
+version: 1.0.0
+description: GitOps 기반 통합 모니터링 스택 (Metrics + Logs)
+dependencies:
+  # 1. 프로메테우스 & 그라파나 스택
+  - name: kube-prometheus-stack
+    version: "58.2.1"
+    repository: "https://prometheus-community.github.io/helm-charts"
+  
+  # 2. 로키 & 프롬테일 로그 스택
+  - name: loki-stack
+    version: "2.10.2"
+    repository: "https://grafana.github.io/helm-charts"
+    

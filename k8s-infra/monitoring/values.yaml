@@ -1,0 +1,118 @@
+# ---------------------------------------------------------
+# 1. Metrics & Dashboard (kube-prometheus-stack 설정)
+# ---------------------------------------------------------
+kube-prometheus-stack:
+  grafana:
+    enabled: true
+    admin:
+      existingSecret: "grafana-auth-secret"
+      userKey: userKey
+      passwordKey: passwordKey
+    service:
+      type: NodePort
+      nodePort: 30080
+    ingress:
+      enabled: true
+      ingressClassName: haproxy
+      annotations:
+        cert-manager.io/cluster-issuer: "private-ca-issuer"
+      hosts:
+        - grafana.local
+      path: /
+      pathType: Prefix # K8s 1.22+ 필수 설정
+      tls:
+        - secretName: grafana-tls
+          hosts:
+            - grafana.local
+    # KST(한국 시간) 강제 적용
+    grafana.ini:
+      date_formats:
+        default_timezone: Asia/Seoul
+
+    # Loki 데이터소스 수동 명시
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        url: http://loki-stack:3100  # 환경에 따라 noblesys-monitoring-loki:3100
+        access: proxy
+        isDefault: false  
+
+  prometheus:
+    prometheusSpec:
+      resources:
+        requests:
+          memory: "2Gi" # 최소 보장 메모리
+          cpu: "500m"
+        limits:
+          memory: "4Gi" # 최대 허용 메모리 (OOM 방지)
+          cpu: "1000m"
+      retention: 30d
+      retentionSize: 40GB # 여유 공간 확보 (45GB -> 40GB)
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: local-path
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 50Gi
+
+  # 하드웨어(iDRAC/iLO/XCC) 모니터링 연동 설정
+  #additionalServiceMonitors:
+    #- name: ipmi-exporter-targets
+      #jobLabel: hw-monitoring
+      #selector:
+        #matchLabels:
+          #app.kubernetes.io/name: prometheus-ipmi-exporter
+      #endpoints:
+        #- port: http
+          #interval: 30s
+          #path: /ipmi
+          #params:
+            #module: ["default"] # 공통 계정(prometheus/monitor123) 사용하는 모듈
+            #target: # 실제 장비 IP로 수정
+              #- "192.168.1.10"  # Dell R640
+              #- "192.168.1.20"  # HPE Gen10
+              #- "192.168.1.30"  # Lenovo SR650
+
+# ---------------------------------------------------------
+# 2. Logging (loki-stack 설정)
+# ---------------------------------------------------------
+loki-stack:
+  # 이렇게 꺼두어야 위의 kube-prometheus-stack 설정과 충돌하지 않음.
+  grafana:
+    enabled: false
+    sidecar:
+      datasources:
+        enabled: false
+        
+  loki:
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClassName: local-path
+    config:
+      limits_config:
+        retention_period: 14d
+      compactor:
+        working_directory: /data/loki/boltdb-shipper-compactor
+        shared_store: filesystem
+        retention_enabled: true
+    # Loki 메모리 폭주 방지
+    resources:
+      limits:
+        memory: 2Gi
+      requests:
+        memory: 1Gi
+
+  promtail:
+    enabled: true
+    config:
+      clients:
+        - url: http://loki-stack:3100/loki/api/v1/push
+    # 데몬셋 리소스 제한
+    resources:
+      limits:
+        memory: 256Mi
+      requests:
+        memory: 128Mi
