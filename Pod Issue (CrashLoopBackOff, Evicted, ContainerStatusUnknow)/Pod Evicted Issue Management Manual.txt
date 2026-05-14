@@ -1,0 +1,31 @@
+Pod Evicted Issue Management Manual
+
+# 문제 Pod 어디 노드인지 확인
+kubectl get pods -n monitoring -o wide | grep promtail
+
+# Running, Completed 제외하고 출력
+kubectl get pods -n monitoring | grep -v 'Running\|Completed'
+
+# 디스크 사용량 및 Inode(파일 개수) 고갈 확인
+df -h (85% 넘으면 문제)
+df -i (90~100% 근접하면 문제)
+
+# 쫓겨난(Evicted) 파드 찌꺼기 일괄 삭제
+kubectl delete pods --field-selector status.phase=Failed -A
+
+# 덩치 큰 로그 파일 강제 청소
+crictl rmi --prune (옛날 컨테이너 이미지 찌꺼기 강제 삭제)
+journalctl --vacuum-time=1d (OS 시스템 저널 로그 최근 1일치 남기고 모두 삭제)
+du -sh /var/log/* | sort -rh | head -n 5 (/var/log 디렉토리 가장 용량이 큰 폴더 확인)
+docker system prune -a -f (Docker 사용하는 경우)
+
+# 해당 노드 Kubelet 재시작 및 노드 상태 확인
+systemctl restart kubelet
+kubectl describe node node1 | grep -A 5 "Conditions:" (목록에 DiskPressure 상태가 False이면 정상)
+
+# 좀비 파드 일괄 강제 삭제 명령어 (좀비 상태이므로 --force 옵션 필수, 1~5개 이하 삭제 시)
+kubectl delete pod monitoring-grafana-5d89db44c-2gwxg -n monitoring --force --grace-period=0
+kubectl delete pod 파드이름1 파드이름2 파드이름3 파드이름4 파드이름5 -n monitoring --force --grace-period=0
+
+# 좀비 파드 일괄 강제 삭제 명령어 (좀비 상태이므로 --force 옵션 필수, 수십 개 삭제 시)
+kubectl get pods -n monitoring | grep ContainerStatusUnknown | awk '{print $1}' | xargs kubectl delete pod -n monitoring --force --grace-period=0

@@ -1,0 +1,28 @@
+Pod CrashLoopBackOff -> 리소스 부족 현상
+
+# VM 리소스 증설
+CPU: 4 vCPUs
+Memory: 16GB
+Disk: 50GB
+
+# Patch 명령어
+
+1. argocd-repo-server CPU와 메모리 제한(Limits) 늘려주기
+kubectl patch deployment argocd-repo-server -n argocd --type=merge -p='{"spec":{"template":{"spec":{"containers":[{"name":"argocd-repo-server","resources":{"limits":{"memory":"1Gi","cpu":"1000m"},"requests":{"memory":"512Mi","cpu":"500m"}}}]}}}}'
+
+2. 찌꺼기 날리기
+kubectl patch application noblesys-monitoring -n argocd --type=json -p='[{"op": "remove", "path": "/operation"}]'
+
+3. 자원 증설과 대기 시간 연장
+kubectl patch deployment argocd-repo-server -n argocd --type=merge -p='{"spec":{"template":{"spec":{"containers":[{"name":"argocd-repo-server","resources":{"limits":{"memory":"2Gi","cpu":"1000m"}},"livenessProbe":{"timeoutSeconds": 60, "periodSeconds": 30, "failureThreshold": 10},"readinessProbe":{"timeoutSeconds": 60, "periodSeconds": 30, "failureThreshold": 10}}]}}}}'
+
+---
+
+# set 명령어로 리소스 강제 주입
+kubectl set resources deployment argocd-repo-server -n argocd -c argocd-repo-server --limits=memory=2Gi,cpu=1000m --requests=memory=512Mi,cpu=500m
+
+# 재시작
+kubectl rollout restart deployment argocd-repo-server -n argocd
+
+# 상태 확인
+kubectl get pods -n argocd -w
