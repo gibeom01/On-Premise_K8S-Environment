@@ -1,0 +1,76 @@
+부팅 시 Job systemd-networkd-wait-online.service... 반복 출력 이슈
+
+결과적 증상: IPVS: rr: TCP 10.233.0.3:53 - no destination available
+
+# Pod 상태 확인 및 CNI 확인
+kubectl get pods -n kube-system -o wide -> calico-node 파드들이 모두 Running 상태인지 먼저 확인
+
+# log 확인
+kubectl logs -n kube-system -l k8s-app=kube-dns --tail=50
+
+# 포워딩 설정 점검
+cat /proc/sys/net/ipv4/ip_forward -> 0이 나오면 sudo sysctl -w net.ipv4.ip_forward=1로 활성화
+
+--- 해결안 됨 -> 다음 진행
+
+# 방화벽 해제
+sudo ufw disable
+
+# DNS 무한 루프 끊어내기
+sudo rm /etc/resolv.conf -> 기존에 잘못 연결된 로컬 DNS 설정을 삭제
+sudo ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf -> 진짜 외부 DNS 정보를 담은 원본 파일로 링크를 다시 걸어줌
+
+# CoreDNS 재시작
+sudo kubectl rollout restart deployment coredns -n kube-system
+sudo kubectl get pods -n kube-system -l k8s-app=kube-dns
+
+--- Pod 1개만 CrashLoopBackOff 상태
+
+# 시작한 CoreDNS 내부 에러 확인
+kubectl logs -n kube-system -l k8s-app=kube-dns
+
+# 변경한 DNS 설정 주소 확인
+cat /etc/resolv.conf
+
+# Calico 상태 확인
+kubectl get pods -n kube-system -l k8s-app=calico-node
+
+---
+
+문제: [WARNING] plugin/kubernetes: Kubernetes API connection failure: the server has asked for the client to provide credentials
+원인: API 서버가 유효한 신분증이 아니라고 401 Unauthorized 쫓아내는 상황
+
+# 시간 동기화 서비스 재시작 및 활성화 (모든 노드에서)
+sudo systemctl restart systemd-timesyncd
+sudo timedatectl set-ntp true
+date -> 시간 확인
+
+# 시간 차이가 3분이내 좁혀지지 않으면 (워커 노드에서)
+sudo timedatectl set-ntp off
+sudo date -s "05:55:10" -> 마스터 노드 현재 시간에 맞춰서 수정
+
+# 기존 에러 발생 Pod 삭제 후 다시 생성
+kubectl delete pod -n kube-system -l k8s-app=kube-dns
+
+---
+문제: calico, coredns 2개 전부 ready 안되는 이슈
+원인: coredns pod -> dial tcp 10.233.75.14:8181: connect: invalid argument 에러
+
+# 시간 동기화 서비스 재시작 및 활성화 (모든 노드에서)
+sudo systemctl restart systemd-timesyncd
+sudo timedatectl set-ntp true
+date -> 시간 확인
+
+# 기존 에러 발생 Pod 삭제 후 다시 생성 (마스터 노드에서)
+kubectl delete pod -n kube-system -l k8s-app=calico-kube-controllers
+kubectl delete pod -n kube-system -l k8s-app=kube-dns
+
+# Calico-node 전면 재배치 (마스터 노드에서)
+kubectl delete pod -n kube-system -l k8s-app=calico-node
+
+# 워커 노드 Kubelet 재시작
+sudo systemctl restart kubelet
+
+# CoreDNS 다시 생성 (마스터 노드에서)
+kubectl delete pod -n kube-system -l k8s-app=kube-dns
+
