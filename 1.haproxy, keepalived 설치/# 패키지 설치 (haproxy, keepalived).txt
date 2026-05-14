@@ -1,0 +1,61 @@
+# 패키지 설치 (haproxy, keepalived)
+1. sudo apt update && sudo apt install -y haproxy keepalived
+
+# HAProxy 설정
+1. cat >> /etc/haproxy/haproxy.cfg
+
+frontend rke2-api
+    bind *:6443             # 6443 포트로 들어오는 요청 수신
+    mode tcp
+    option tcplog
+    default_backend rke2-api-backend
+
+backend rke2-api-backend
+    mode tcp
+    option tcp-check
+    balance roundrobin      # 순차적으로 부하 분산
+    # 실제 마스터 노드들의 IP와 포트 (6443)
+    server master1 221.139.104.182:6443 check
+    server master2 221.139.104.183:6443 check
+
+# 문법 검증 및 재시작
+1. haproxy -c -f /etc/haproxy/haproxy.cfg
+2. systemctl restart haproxy
+
+# Keepalived 설정
+1. cat > /etc/keepalived/keepalived.conf (# 전부 없애고 복붙해야 함)
+
+vrrp_script check_haproxy {
+    script "killall -0 haproxy" # HAProxy 프로세스가 살아있는지 확인
+    interval 2
+    weight 2
+}
+
+vrrp_instance VI_1 {
+    state MASTER            # 2번 서버는 BACKUP으로 설정
+    interface ens160        # 본인의 네트워크 인터페이스명 (ip addr로 확인)
+    virtual_router_id 51    # 동일 네트워크 내 유일한 값
+    priority 101            # 2번 서버는 100으로 설정하여 우선순위 차등
+    advert_int 1
+
+    authentication {
+        auth_type PASS
+        auth_pass 1234       # 패스워드 설정
+    }
+
+    virtual_ipaddress {
+        221.139.104.184       # 사용할 가상 IP(VIP) 할당하지 않는 대역으로 넣기
+    }
+
+    track_script {
+        check_haproxy
+    }
+}
+
+# VIP 기동 및 작동 확인
+1. sudo systemctl enable --now keepalived (Keepalived 서비스 시작 시 설정 파일에 적힌 VIP가 네트워크 인터페이스 나옴.)
+2. ip addr show ens160
+
+# 커널 파라미터 적용
+1. echo "net.ipv4.ip_nonlocal_bind = 1" | sudo tee -a /etc/sysctl.conf
+2. sudo sysctl -p
