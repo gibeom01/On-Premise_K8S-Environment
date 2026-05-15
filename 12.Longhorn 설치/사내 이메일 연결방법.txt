@@ -1,5 +1,9 @@
 사내 이메일 연결방법
 
+# Google Email 등록 시 앱 비밀번호 생성 방법
+브라우저 -> Google 계정 관리 -> 앱 비밀번호 -> 앱 이름 입력 시 16자리 PW 생성됨 (예시: kyiw ojio idbq pqif)
+
+# K8S Google 앱 비밀번호 등록 방법
 1. cat <<EOF > values-smtp.yaml
 grafana:
   assertNoLeakedSecrets: false
@@ -18,10 +22,14 @@ EOF
 -f values-smtp.yaml \
 --reuse-values
 
-3. kubectl get configmap -n monitoring monitoring-grafana -o yaml | grep -A 10 "\[smtp\]"
+3. kubectl get configmap -n monitoring monitoring-grafana -o yaml | grep -A 10 "\[smtp\]" (smtp 값 확인)
 
-4. kubectl rollout restart deployment monitoring-grafana -n monitoring
+4. kubectl rollout restart deployment monitoring-grafana -n monitoring (새 ConfigMap 읽도록 deploy 재시작)
 
-5. kubectl get pods -n monitoring | grep grafana
+5. kubectl get pods -n monitoring | grep grafana (Pod Running 확인)
 
-앱 PW: kyiw ojio idbq pqif
+6. kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80 --address 0.0.0.0 (포트 포워딩)
+
+7. 브라우저 -> 221.139.104.182:3000 접속 -> Grafana 접속 완료
+
+Data Sources에서 Prometheus -> Add new data source
