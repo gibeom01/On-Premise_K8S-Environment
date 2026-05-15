@@ -1,0 +1,69 @@
+##### 폐쇄망(Air-gapped) 환경에서는 외부 인증 기관(Let's Encrypt 등)을 사용할 수 없으므로, 내부 전용 CA(Certificate Authority)를 구축하여 인증서를 직접 발급하고 관리해야 합니다. Cert-manager를 활용해 폐쇄망에서 사설 인증서를 자동화하는 방법을 설명해 드립니다.
+
+# 1. 전용 CA(Private CA) 생성 및 등록
+###### 먼저 클러스터 내부에서 사용할 최상위 루트 인증서(Root CA)를 생성합니다.
+
+#bash (private-ca-secret.yaml 생성: (이미 보유한 CA 키가 없다면 아래와 같이 생성))
+# 1. CA 키 생성
+openssl genrsa -out ca.key 2048
+# 2. 사설 루트 인증서 생성 (10년 유효)
+openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 -out ca.crt -subj "/CN=My-Private-CA"
+
+# 3. 생성된 키를 K8s Secret으로 등록
+kubectl create namespace cert-manager
+kubectl create secret tls-ca-key-pair \
+   --cert=ca.crt \
+   --key=ca.key \
+   --namespace=cert-manager
+
+#2. 사설 CA용 ClusterIssuer 설정
+###### 이제 Cert-manager가 위에서 만든 Secret을 사용하여 인증서를 발급하도록 설정합니다.
+
+#yaml (private-ca-issuer.yaml 생성)
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: private-ca-issuer
+spec:
+  ca:
+    secretName: tls-ca-key-pair # 위에서 만든 Secret 이름
+
+###### 적용: kubectl apply -f private-ca-issuer.yaml
+
+# 3. HAProxy Ingress에 사설 SSL 적용
+###### 폐쇄망용 도메인에 대해 인증서 발급을 요청합니다.
+
+#yaml (internal-app-ingress.yaml 수정)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: private-app-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: "private-ca-issuer" # 사설 Issuer 지정
+    haproxy.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: haproxy
+  tls:
+  - hosts:
+    - internal-app.local        # 폐쇄망 내부 도메인
+    secretName: internal-app-tls # 인증서 자동 생성 및 저장됨
+  rules:
+  - host: internal-app.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: my-service
+            port:
+              number: 80\
+
+# 4. 폐쇄망 환경의 핵심: 신뢰 구축 (Trust)
+####### 사설 인증서는 브라우저나 서버가 기본적으로 신뢰하지 않으므로, 클라이언트 기기에 CA 인증서를 등록해야 합니다. [1, 2]
+## PC/브라우저: 아까 만든 ca.crt 파일을 다운로드하여 '신뢰할 수 있는 루트 인증 기관'에 수동 등록합니다.
+## 다른 서비스(Pod): 다른 파드에서 이 HTTPS 서비스에 접근하려면, 해당 파드의 이미지나 OS에 ca.crt를 포함시켜야 인증 오류가 나지 않습니다.
+
+# 💡 폐쇄망 운영 팁
+## 유효 기간: 사설 인증서는 굳이 90일(Let's Encrypt 기준)로 짧게 잡을 필요가 없습니다. Certificate 리소스 설정 시 duration을 길게 조절할 수 있습니다.
+## 헬름 차트 다운로드: 폐쇄망에서는 helm repo add가 안 되므로, 인터넷이 되는 곳에서 helm pull로 차트를 다운로드하여 Tar 파일 형태로 반입해야 합니다.

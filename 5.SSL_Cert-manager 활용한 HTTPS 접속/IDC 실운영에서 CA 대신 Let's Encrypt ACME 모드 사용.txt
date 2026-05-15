@@ -1,0 +1,83 @@
+###### IDC 실운영 환경에서 Cert-manager는 Let's Encrypt와 같은 인증 기관으로부터 SSL 인증서를 자동으로 발급받고 갱신해주는 필수 도구입니다. HAProxy Ingress와 결합하면 수동 작업 없이 HTTPS 보안 연결을 유지할 수 있습니다.
+
+# 1. Cert-manager 설치 (Helm 이용)
+###### 가장 먼저 Kubernetes 클러스터에 Cert-manager 컨트롤러를 설치합니다.
+
+#bash
+# Helm 저장소 추가
+helm repo add jetstack https://jetstack.io
+helm repo update
+
+# Cert-manager 설치 (Custom Resource Definitions 포함)
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager --create-namespace \
+  --set installCRDs=true
+
+# 2. 발급자(ClusterIssuer) 설정
+###### 인증서를 어디서 발급받을지 정의합니다. Let's Encrypt를 사용하는 예시입니다.
+
+#yaml (cluster-issuer.yaml 생성)
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://letsencrypt.org
+    email: your-email@example.com  # 본인 이메일 (만료 알림 수신용)
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: haproxy  # 아까 설치한 HAProxy Ingress 사용
+
+###### 적용: kubectl apply -f cluster-issuer.yaml
+
+# 3. HAProxy Ingress에 자동 SSL 적용
+###### 이제 특정 서비스(Ingress)에 "이 도메인은 SSL이 필요해"라고 선언만 하면 됩니다.
+
+#yaml (my-app-ingress.yaml 수정)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: secure-app-ingress
+  annotations:
+    # 1. 아까 만든 Issuer 지정
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # 2. HAProxy 전용 설정 (HTTPS 강제 리다이렉트)
+    haproxy.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: haproxy
+  tls:
+  - hosts:
+    - ://example.com        # 본인 도메인
+    secretName: myapp-tls-cert # 인증서가 저장될 Secret 이름 (자동 생성됨)
+  rules:
+  - host: ://example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: my-service
+            port:
+              number: 80
+
+# 4. 동작 원리 및 확인 방법
+## 발급 요청: Ingress를 배포하면 Cert-manager가 감지하여 Let's Encrypt에 인증을 요청합니다.
+## HTTP-01 챌린지: Let's Encrypt가 ://example.com... 경로로 접속해 실소유주인지 확인합니다.
+## 인증서 발급: 확인이 끝나면 인증서가 myapp-tls-cert라는 Secret에 자동으로 저장됩니다.
+## HAProxy 적용: HAProxy Ingress가 해당 Secret을 읽어 즉시 HTTPS 서비스를 시작합니다.
+
+
+#bash (상태 확인 명령어)
+# 인증서 발급 진행 상태 확인
+kubectl get certificate -A
+# 챌린지 진행 상태 확인 (에러 발생 시 유용)
+kubectl get challenges -A
+
+# ⚠️ IDC 환경 주의사항 (중요)
+## 공인 IP 및 DNS: Let's Encrypt를 쓰려면 example.com 도메인이 실제 IDC의 공인 IP(L3/L4 스위치 또는 HAProxy VIP)를 가리키고 있어야 하며, 80 포트가 외부에서 접속 가능해야 합니다.
+## 사설망 환경: 만약 폐쇄망이라면 HTTP-01 대신 DNS-01 챌린지(Cloudflare, AWS Route53 API 등 연동)를 사용해야 합니다.

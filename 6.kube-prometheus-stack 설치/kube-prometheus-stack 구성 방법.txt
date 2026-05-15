@@ -1,0 +1,114 @@
+kube-prometheus-stack 구성 방법
+
+# 저장소 추가 및 차트 다운로드
+1. helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+2. helm pull prometheus-community/kube-prometheus-stack --version 56.0.0
+
+# 설정 파일 생성
+cat << 'EOF' > monitoring-values.yaml
+prometheus:
+  prometheusSpec:
+    retention: 30d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 50Gi
+grafana:
+  ingress:
+    enabled: true
+    ingressClassName: haproxy
+    annotations:
+      cert-manager.io/cluster-issuer: "private-ca-issuer"
+    hosts:
+      - grafana.local
+    path: /
+    pathType: Prefix
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - grafana.local
+  adminPassword: "admin-password"
+EOF
+
+# Local-path StorageClass 구축 (Persistence, 데이터 영속성)
+-> 프로메테우스는 1초 단위 쏟아지는 데이터 저장하는 시계열 데이터베이스(TSDB).
+-> 파드 내부(메모리+임시 디스크) 저장하기 때문에 파드 재시작 시 데이터가 증발하는 것 방지.
+
+1. kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.28/deploy/local-path-storage.yaml (Local-path Provisioner 배포)
+2. kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' (생성된 스토리지 클래스 Default 지정)
+
+# 설치
+1. helm install monitoring ./kube-prometheus-stack-56.0.0.tgz \
+  --namespace monitoring --create-namespace \
+  -f monitoring-values.yaml
+
+# hosts 설정
+1. 윈도우에서 메모장을 관리자 권한으로 실행.
+
+2. C:\Windows\System32\drivers\etc\hosts 파일 오픈.
+
+3. 맨 아랫줄에 외부 LB의 VIP(221.139.104.184)와 도메인 작성 -> 파일 저장 시 권한없음 뜨면 알약, v3의 호스트 파일 보호 해제.
+221.139.104.184 grafana.local
+
+# Grafana Login
+Email or username: admin
+Password: admin-password
+
+---
+
+추가적으로 Production 환경의 안정성 확인
+
+# 1. "Node Exporter Full" 대시보드 (하드웨어 모니터링, 장애 예측 매우 유리)
+-> K8s의 모든 노드에 node-exporter라는 스파이(데몬셋) 있는데 이 데몬이 수집한 CPU, RAM, 디스크 I/O, 네트워크 트래픽 등의 방대한 로우 데이터를 시각적 보여줌.
+
+1. Grafana에 admin으로 로그인.
+2. 왼쪽 메뉴에서 Dashboards ➡️ 우측 상단 New ➡️ Import 클릭.
+3. "Import via grafana.com" 칸에 1860 입력 Load 클릭 ➡️ Import 클릭.
+4. 만약 Import 후 그래프에 "No Data"가 뜬다면? -> 대시보드 화면 맨 위쪽 Datasource 혹은 Job 등을 선택하는 드롭다운 메뉴에 Prometheus 선택.
+
+# 2. Resource Limit (메모리 누수 및 OOM 방지)
+-> 데이터를 디스크에 쓰기 전에 최근 2시간 분량의 데이터를 무조건 메모리(RAM)에 쥐고 있음.
+-> K8s 환경에서 자원 제한 안 걸어두면 노드 전체 메모리 다 잡아먹고 시스템 뻗게 하거나, K8s 시스템에 의해 강제로 OOMKilled 당함.
+
+1.  cat >> monitoring-values.yaml
+
+prometheus:
+  prometheusSpec:
+    resources:
+      requests:
+        memory: "2Gi"  # 최소 보장 메모리
+        cpu: "500m"
+      limits:
+        memory: "4Gi"  # 최대 허용 메모리 (운영 환경 권장 최소치)
+        cpu: "1000m"
+
+2. helm upgrade --install monitoring ./kube-prometheus-stack-56.0.0.tgz \
+  --namespace monitoring \
+  -f monitoring-values.yaml
+3. kubectl get pods -n monitoring -w (적용 확인)
+
+# 3. Retention Size (스토리지 폭발 방지 안전장치)
+-> 데이터 보관 기간 30일 설정해도 트래픽 급증 시 20일만에 할당한 50GB 스토리지 꽉 차버릴 수 있음.
+-> 디스크 용량 기반의 안전장치 하나 더 걸어 PV가 50GB라면, 약 10% 여유 남기고 오래된 데이터 지우도록 설정.
+
+1.  cat >> monitoring-values.yaml
+
+prometheus:
+  prometheusSpec:
+    retention: 30d
+    retentionSize: "45GB" # 💡 50GB 디스크가 꽉 차기 전인 45GB 도달 시 오래된 데이터 강제 삭제
+
+2. helm upgrade --install monitoring ./kube-prometheus-stack-56.0.0.tgz \
+  --namespace monitoring \
+  -f monitoring-values.yaml
+3. kubectl get pods -n monitoring -w (적용 확인)
+
+# 4. Alertmanager 연동 (모니터링 꽃 '알람')
+-> kube-prometheus-stack에는 Alertmanager 내장되어 있음.
+-> values.yaml Webhook 주소만 적어주면 장애 발생 시 즉시 스마트폰으로 알림 전송 가능.
+
+# 5. 엔터프라이즈 서버 대역 외(OOB) 모니터링 연동
+-> 물리 장비의 하드웨어 상태 (팬 속도, 전원 공급장치 온도, 섀시 상태 등) 모니터링 위해 ipmi-exporter, snmp-exporter 연동 가능.
+-> 이를 통해 iDRAC이나 iLO 포트로 직접 접근하여 엔터프라이즈 장비의 물리적 결함 OS 장애보다 먼저 캐치할 수 있는 환경 구축 가능.

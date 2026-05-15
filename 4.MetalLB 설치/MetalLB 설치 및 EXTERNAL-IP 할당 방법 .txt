@@ -1,0 +1,41 @@
+# Kube-proxy 통신 설정 (ARP 모드 변경)
+kubectl get configmap kube-proxy -n kube-system -o yaml | \
+sed -e "s/strictARP: false/strictARP: true/" | \
+kubectl apply -f - -n kube-system
+
+# MetalLB 본체 설치
+1. kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.3/config/manifests/metallb-native.yaml
+2. kubectl get pods -n metallb-system -w
+
+# 사용할 IP 대역(Pool) 설정
+
+1. kubectl get nodes -o wide
+2. cat > metallb-config.yaml
+
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: default-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  # 현재 서버와 같은 대역이면서, 다른 기기가 안 쓰고 있는 남는 IP 범위
+  - 221.139.104.182-221.139.104.186
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: default-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - default-pool
+
+3. kubectl apply -f metallb-config.yaml
+
+# 확인 및 부하 분산 테스트
+1. kubectl get svc lb-test
+2. while true; do curl -s http://221.139.104.182 | grep "HOSTNAME"; sleep 0.5; done
+
+# 웹 브라우저 확인
+http://[INTERNAL-IP 입력]

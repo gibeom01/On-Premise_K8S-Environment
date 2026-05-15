@@ -1,0 +1,66 @@
+###### 폐쇄망 환경에서 Harbor는 단순한 이미지 저장소를 넘어, 보안 취약점 점검(Trivy)과 이미지 서명(Notary) 기능을 제공하는 엔터프라이즈급 관리 도구입니다. RKE2 클러스터와 연동하여 외부망 연결 없이도 안정적으로 이미지를 배포하는 환경을 구축해 보겠습니다.
+
+# 1. Harbor 설치 준비 (Helm 방식)
+###### 폐쇄망에서는 외부 헬름 저장소를 쓸 수 없으므로, 인터넷이 되는 곳에서 차트를 미리 다운로드하여 반입해야 합니다.
+
+#bash
+# 외부망에서 수행
+helm repo add harbor https://goharbor.io
+helm pull harbor/harbor --version 1.14.0 # tgz 파일 다운로드
+
+#2. Harbor 설치 및 설정 (values.yaml)
+###### 가장 중요한 포인트는 데이터 저장소(PVC)와 접속 주소(Ingress) 설정입니다.
+
+#yaml (harbor-values.yaml 핵심 설정)
+expose:
+  type: ingress
+  tls:
+    enabled: true
+    certSource: secret
+    secretName: harbor-tls-cert # 아까 만든 cert-manager로 생성할 인증서
+  ingress:
+    hosts:
+      core: harbor.local        # 내부 도메인
+    controller: haproxy         # HAProxy Ingress 사용
+
+externalURL: https://harbor.local
+
+persistence:
+  enabled: true
+  resourcePolicy: "keep"
+  persistentVolumeClaim:
+    registry:
+      size: 100Gi               # 이미지 저장 공간
+
+###### 설치: helm install harbor ./harbor-1.14.0.tgz -f harbor-values.yaml -n harbor --create-namespace
+
+# 3. RKE2와 Harbor 연동 (중요)
+###### 폐쇄망에서는 RKE2가 이미지를 가져올 때 Harbor를 바라보도록 설정해야 합니다. 모든 노드(Master/Worker)에서 수행합니다.
+
+#yaml (/etc/rancher/rke2/registries.yaml 작성)
+mirrors:
+  "harbor.local":               # Harbor 도메인
+    endpoint:
+      - "https://harbor.local"
+configs:
+  "harbor.local":
+    auth:
+      username: admin           # Harbor 계정
+      password: password123     # Harbor 비번
+    tls:
+      ca_file: /etc/rancher/rke2/ca.crt # 아까 만든 사설 CA 인증서 복사
+
+###### 설정 후 서비스 재시작: sudo systemctl restart rke2-server (또는 rke2-agent)
+
+# 4. 사설 인증서 신뢰 설정 (Docker/Containerd)
+####### Harbor가 사설 인증서(HTTPS)를 사용하므로, 노드의 OS 수준에서 이 인증서를 신뢰해야 ImagePullBackOff 에러가 나지 않습니다.
+
+#bash
+# 사설 CA 인증서를 시스템 신뢰 경로로 복사
+sudo cp ca.crt /usr/local/share/ca-certificates/harbor-ca.crt
+sudo update-ca-certificates
+
+# 5. Harbor의 특장점 활용 (운영 팁)
+## 프로젝트 격리: 팀별로 프로젝트를 나눠 이미지 접근 권한을 제어할 수 있습니다.
+## 취약점 스캔: 이미지를 Push하면 자동으로 보안 취약점을 검사하여 위험한 이미지는 배포되지 않게 차단합니다.
+## 복제(Replication): 다른 IDC의 Harbor와 이미지를 자동으로 동기화하여 재해 복구(DR) 환경을 구성할 수 있습니다.

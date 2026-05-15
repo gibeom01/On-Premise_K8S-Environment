@@ -1,0 +1,96 @@
+CA HTTPS 전환
+
+# 저장소 추가 및 업데이트
+1. helm repo add jetstack https://charts.jetstack.io
+2. helm repo update
+
+# Cert-manager 설치 명령어 (CRD 포함)
+1. helm upgrade --install cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --create-namespace \
+  --set installCRDs=true
+
+# 자체 서명 CA 인증서 및 Secret 생성
+1. openssl genrsa -out ca.key 2048 (Private Key 생성)
+2. openssl req -x509 -new -nodes -key ca.key -subj "/CN=Noblesys-Test-CA" -days 3650 -out ca.crt (Root CA 생성, CN 이름은 Noblesys-Test-CA)
+3. kubectl create secret tls tls-ca-key-pair \
+  --cert=ca.crt \
+  --key=ca.key \
+  -n cert-manager
+(만들어진 인증서와 키를 K8s Secret으로 묶어서 cert-manager에게 전달)
+
+# 사설 ClusterIssuer 생성
+1. cat > ca-issuer.yaml
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: private-ca-issuer
+spec:
+  ca:
+    secretName: tls-ca-key-pair
+
+2. kubectl apply -f ca-issuer.yaml
+
+# HAProxy Ingress에 SSL 적용
+1. cat > myapp-ingress.yaml
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: secure-web-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: "private-ca-issuer"
+    haproxy.ingress.kubernetes.io/ssl-redirect: "true" # HTTP 접속 시 HTTPS로 강제 리다이렉트
+spec:
+  ingressClassName: haproxy
+  tls:
+  - hosts:
+    - myapp.local
+    secretName: myapp-tls-cert # 인증서가 자동 생성되어 저장될 Secret 이름
+  rules:
+  - host: myapp.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: test-web-svc
+            port:
+              number: 80
+              
+2. kubectl apply -f myapp-ingress.yaml
+
+# /etc/haproxy/haproxy.cfg에 https 추가 작성
+1. cat >> /etc/haproxy/haproxy.cfg
+
+frontend https-in
+    bind *:443
+    mode tcp
+    default_backend ingress-https-backend
+
+backend ingress-https-backend
+    mode tcp
+    balance roundrobin
+    # 아까 확인한 443용 NodePort (예: 30277)를 적어줍니다.
+    server worker1 221.139.104.182:30277 check
+    server worker2 221.139.104.183:30277 check
+
+2. sudo systemctl restart haproxy
+
+# ca.crt 인증서 등록
+1. vi ca.crt -> -----BEGIN CERTIFICATE----- 부터 -----END CERTIFICATE----- 까지 전부 복사.
+2. 바탕화면 우클릭(텍스트 문서 생성) -> 복사한 ca.crt 키 붙여넣기 후 저장 -> 파일 이름 noblesys.crt 변경
+3. noblesys.crt 더블클릭 -> 인증서 설치 -> 저장소 위치 "로컬 컴퓨터" 선택 -> 모든 인증서를 다음 저장소에 저장 선택 -> 찾아보기에서 "신뢰할 수 있는 루트 인증 기관" 폴더 선택 -> 마침.
+
+# 최종 접속 테스트(여기해야함)
+
+1. 윈도우에서 메모장을 관리자 권한으로 실행.
+
+2. C:\Windows\System32\drivers\etc\hosts 파일 오픈.
+
+3. 맨 아랫줄에 외부 LB의 VIP(221.139.104.184)와 도메인 작성 -> 파일 저장 시 권한없음 뜨면 알약, v3의 호스트 파일 보호 해제.
+221.139.104.184 myapp.local
+
+4. 저장 후 크롬 브라우저를 열고 https://myapp.local로 접속.
