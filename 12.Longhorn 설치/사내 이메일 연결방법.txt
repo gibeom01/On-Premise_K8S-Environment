@@ -1,0 +1,27 @@
+사내 이메일 연결방법
+
+1. cat <<EOF > values-smtp.yaml
+grafana:
+  assertNoLeakedSecrets: false
+  grafana.ini:
+    smtp:
+      enabled: true
+      host: smtp.gmail.com:587
+      user: rlqja7638@gmail.com
+      password: kyiwojioidbqpqif
+      from_address: rlqja7638@gmail.com
+      startTLS_policy: MandatoryStartTLS
+EOF
+
+2. helm upgrade monitoring prometheus-community/kube-prometheus-stack \
+--namespace monitoring \
+-f values-smtp.yaml \
+--reuse-values
+
+3. kubectl get configmap -n monitoring monitoring-grafana -o yaml | grep -A 10 "\[smtp\]"
+
+4. kubectl rollout restart deployment monitoring-grafana -n monitoring
+
+5. kubectl get pods -n monitoring | grep grafana
+
+앱 PW: kyiw ojio idbq pqif
