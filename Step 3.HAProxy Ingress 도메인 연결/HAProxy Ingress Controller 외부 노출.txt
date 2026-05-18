@@ -1,0 +1,107 @@
+HAProxy Ingress Controller 외부 노출 (K8s 내부의 L7 라우터 역할)
+
+# HAProxy Ingress Controller 설치 (Helm 방식)
+
+1. Helm 설치 (안 되어 있다면)
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+chmod 700 get_helm.sh
+./get_helm.sh
+
+2. HAProxy 공식 Helm 저장소 추가
+helm repo add haproxytech https://haproxytech.github.io/helm-charts
+helm repo update
+
+3. HAProxy Ingress 설치 (haproxy-controller 전용 네임스페이스 생성)
+helm install haproxy-ingress haproxytech/kubernetes-ingress \
+  --create-namespace \
+  --namespace haproxy-controller
+
+# 테스트용 웹 서버(App) 및 Service 배포
+
+1. test-app.yaml 파일 생성
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: test-web
+  template:
+    metadata:
+      labels:
+        app: test-web
+    spec:
+      containers:
+      - name: web
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-web-svc
+spec:
+  selector:
+    app: test-web
+  ports:
+  - port: 80
+    targetPort: 80
+
+2. kubectl apply -f test-app.yaml
+
+# Ingress 리소스 생성
+
+1. ingress-rule.yaml 파일 생성
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: test-ingress
+spec:
+  ingressClassName: haproxy  # <--- 이 명찰이 반드시 있어야 합니다!
+  rules:
+  - host: app.noblesys.local # 접속할 외부 도메인 주소
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: test-web-svc # 목적지 서비스 이름
+            port:
+              number: 80
+
+2. kubectl apply -f ingress-rule.yaml
+
+# 온프레미스 실무의 최대 난관: 트래픽 끌고 오기 (lb-node1, lb-node2에서 진행)
+
+1. kubectl get svc -n haproxy-controller -> 80 Port의 NodePort 확인.
+
+2. cat >> /etc/haproxy/haproxy.cfg
+
+frontend http-in
+    bind *:80
+    mode tcp
+    default_backend ingress-backend
+
+backend ingress-backend
+    mode tcp
+    balance roundrobin
+    # 아까 확인한 Ingress의 NodePort 번호(예: 31234)를 적어줍니다.
+    server worker1 221.139.104.182:31886 check 
+    server worker2 221.139.104.183:31886 check
+
+3. sudo systemctl restart haproxy
+
+# 최종 접속 테스트(여기해야함)
+
+1. 윈도우에서 메모장을 관리자 권한으로 실행.
+
+2. C:\Windows\System32\drivers\etc\hosts 파일 오픈.
+
+3. 맨 아랫줄에 외부 LB의 VIP(221.139.104.184)와 도메인 작성 -> 파일 저장 시 권한없음 뜨면 알약, v3의 호스트 파일 보호 해제.
+221.139.104.184 app.noblesys.local
+
+4. 저장 후 크롬 브라우저를 열고 http://app.noblesys.local로 접속.

@@ -1,0 +1,77 @@
+Linux Kernel Kubespray Install menual 
+
+★SRE(Site Reliability Engineering) 환경 구성 시 Master/Worker Node(서버) 최소 3대, L4 Load Balancer(HAProxy, Keepalived 등) 2대, 외부 스토리지(NFS, Ceph, SAN 등) 조건에 알맞게 구성해야 함.★
+
+# 배포할 모든 노드에서 공통 사전 작업
+
+1. 배포용 계정 생성 (비밀번호는 복잡하게 설정하거나, SSH 키 통신만 사용할 경우 생략 가능)
+useradd -m -s /bin/bash deploy
+passwd deploy
+
+2. 무암호 sudo 권한 부여
+echo "deploy ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/deploy
+chmod 440 /etc/sudoers.d/deploy
+
+# 마스터 노드 환경 세팅 및 통신 뚫기
+
+1. 마스터에서 각 노드로 SSH 키 복사 (마스터 자신과 워커 모두에게)
+ssh-copy-id deploy@221.139.104.182
+ssh-copy-id deploy@221.139.104.183
+
+2. Kubespray 공식 저장소 복제 및 버전 맞추기
+git clone https://github.com/kubernetes-sigs/kubespray.git
+cd kubespray
+git checkout v2.24.0 (안정적인 릴리즈 버전으로 체크아웃 (예: v2.24.0))
+
+3. pip 및 가상 환경 패키지 설치
+apt update
+apt install -y python3-pip python3-venv
+
+4. 파이썬 가상 환경 생성 및 활성화, 패키지 설치
+python3 -m venv venv
+source venv/bin/activate
+pip3 install -r requirements.txt
+
+# 마스터 노드 인벤토리 구성 및 수정
+
+1. 내 클러스터용 설정 폴더 복사
+cp -rfp inventory/sample inventory/mycluster
+
+2. 대상 VM들의 IP 배열 변수 선언
+declare -a IPS=(221.139.104.182 221.139.104.183)
+
+3. 파이썬 스크립트를 이용해 hosts.yaml 파일 자동 생성
+CONFIG_FILE=inventory/mycluster/hosts.yaml python3 contrib/inventory_builder/inventory.py ${IPS[@]}
+
+4. 인벤토리(hosts.yaml) 명세서 파일 2개 수정
+vi inventory/mycluster/hosts.yaml
+
+1.
+all:
+  hosts:
+    node1:
+      ansible_host: 221.139.104.182
+      ip: 221.139.104.182
+      ansible_user: deploy    #추가
+    node2:
+      ansible_host: 221.139.104.183
+      ip: 221.139.104.183
+      ansible_user: deploy    #추가
+
+2. # apiserver_loadbalancer_domain_name: "elb.some.domain" -> apiserver_loadbalancer_domain_name: "221.139.104.184" (주석처리 해제, VIP 대역으로 수정)
+
+# 무중단 배포 실행
+
+1. 가상 환경(venv)이 활성화된 상태에서 실행
+ansible-playbook -i inventory/mycluster/hosts.yaml -u root -b cluster.yml
+
+# 마스터 노드 접속 및 인증서 획득
+
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+# 통신 확인
+
+kubectl get nodes
+sudo kubectl get pods -n kube-system
