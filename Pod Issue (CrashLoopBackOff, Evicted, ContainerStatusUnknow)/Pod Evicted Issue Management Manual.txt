@@ -23,6 +23,9 @@ docker system prune -a -f (Docker 사용하는 경우)
 systemctl restart kubelet
 kubectl describe node node1 | grep -A 5 "Conditions:" (목록에 DiskPressure 상태가 False이면 정상)
 
+# 해당 이름의 파드만 삭제 명령어
+kubectl delete pod -l app.kubernetes.io/name=grafana -n monitoring
+
 # 좀비 파드 일괄 강제 삭제 명령어 (좀비 상태이므로 --force 옵션 필수, 1~5개 이하 삭제 시)
 kubectl delete pod monitoring-grafana-5d89db44c-2gwxg -n monitoring --force --grace-period=0
 kubectl delete pod 파드이름1 파드이름2 파드이름3 파드이름4 파드이름5 -n monitoring --force --grace-period=0
