@@ -1,0 +1,84 @@
+# Prometheus Operator 설치해 Longhorn 찾도록 구성
+1. cat > longhorn-servicemonitor.yaml
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: longhorn-prometheus-servicemonitor
+  namespace: longhorn-system # Longhorn이 설치된 네임스페이스
+  labels:
+    release: noblesys-monitoring
+spec:
+  selector:
+    matchLabels:
+      app: longhorn-manager # 이 라벨을 가진 서비스를 찾습니다.
+  namespaceSelector:
+    matchNames:
+      - longhorn-system
+  endpoints:
+  - port: manager # Longhorn 매니저의 메트릭 포트 이름
+
+2. kubectl apply -f longhorn-servicemonitor.yaml
+3. kubectl get servicemonitors -n longhorn-system
+4. 브라우저 -> http://<Grafana_IP> 접속 -> Connections -> Data Sources에서 Prometheus 연결 확인.
+5. Dashboards -> New -> Import 클릭 -> Dashboard ID 입력창에 16888 또는 17626 입력 후 Load -> Prometheus 데이터 소스 선택 후 Import.
+6. kubectl port-forward -n monitoring svc/noblesys-monitoring-kube-p-prometheus 9090:9090 --address 0.0.0.0
+7. http://<Prometheus_IP>:9090 접속
+8. 상단 메뉴의 Status -> Targets 클릭 -> Ctrl + F로 longhorn 검색.
+9. kubectl expose deployment longhorn-manager -n longhorn-system --type=ClusterIP --name=longhorn-manager-metrics --port=9500 --target-port=9500 (9500 포트 강제적용)
+
+# 회사 매신저(Google Email) 등록 시 앱 비밀번호 생성 방법
+브라우저 -> Google 계정 관리 -> 앱 비밀번호 -> 앱 이름 입력 시 16자리 PW 생성됨 (예시: kyiw ojio idbq pqif)
+
+# K8S 회사 매신저(Google Email) 등록
+1. cat > values-smtp.yaml
+
+grafana:
+  assertNoLeakedSecrets: false
+  grafana.ini:
+    smtp:
+      enabled: true
+      host: smtp.gmail.com:587
+      user: rlqja7638@gmail.com
+      password: kyiwojioidbqpqif
+      from_address: rlqja7638@gmail.com
+      startTLS_policy: MandatoryStartTLS
+
+2. helm upgrade monitoring prometheus-community/kube-prometheus-stack \
+--namespace monitoring \
+-f values-smtp.yaml \
+--reuse-values
+
+3. kubectl get configmap -n monitoring monitoring-grafana -o yaml | grep -A 10 "\[smtp\]" (smtp 값 확인)
+4. kubectl rollout restart deployment monitoring-grafana -n monitoring (새 ConfigMap 읽도록 deploy 재시작)
+5. kubectl get pods -n monitoring | grep grafana (Pod 전부 Running 확인)
+6. kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80 --address 0.0.0.0 (3000 포트 포워딩)
+7. 브라우저 http://221.139.104.182:3000 접속 -> Administration -> General -> Settings -> smtp 값에 설정한 user, addr, pw 확인.
+
+# Grafana Alerting 설정
+1. Alerting -> Notification configuration -> Name, Integration(Email), Addr(Email Addr) -> Test -> Predefined -> Send test notification 클릭 -> 설정한 Email Addr로 Test알림 도착.
+
+# 알람과 연락처 연결하기 -> 알림 규칙 여러 개 만들어도 알아서 email로 배달.
+1. Notification configuration -> Notification policie에 Default policy Edit -> Edit route에 Dafault contact point를 Alerting 설정한 Email 선택 -> Update policy.
+
+# 알람 메일 대시보드 링크, 상세 메시지 포함 방법
+1. Dashboards에 New 클릭 후 Import 선택 -> Import via grafana.com 밑에 칸에 16888 또는 13032 입력 후 Load -> Prometheus 데이터 소스 선택란 Prometheus 또는 noblesys-monitoring... 선택 -> Import.
+2. Alerting -> Alert rules에 New alert rule 클릭 -> Rule name(Volume-Error-Alert) 입력.
+3. Add folder and lables에 New folder 클릭 -> Longhorn-Alerts 입력 후 확인.
+4. Set evaluation behavior에 New Evaluation group 클릭 -> 1m-check 입력 -> Evaluation interval 1m 선택(1분마다 쿼리 검사) -> Pending period 1m 선택(1분 동안 계속 아프면 알람)
+5. Summary, Description 칸에 {{ $labels.volume }} 볼륨에 장애가 발생했습니다! 당장 확인해주세요. -> @ Link dashboard and panel 클릭 -> Dashboard에 Longhorn 검색 -> Volume Robustness나 Storage Usage 등 선택 후 Confirm 클릭.
+
+# 디스크 85% 초과 예방 알람 만들기
+1. Alerting -> Alert rules에 New alert rule 선택 -> Rule name(Longhorn-Node-Storage-85-Warning) 입력.
+2. Define query and alert condition에 Prometheus 선택.
+3. Code 선택 -> 값은 (longhorn_node_storage_usage_bytes / longhorn_node_storage_capacity_bytes) * 100
+4. Alert condition 값은 85 (Prometheus 아무 대답 없다가 설정 값 넘는 순간 데이터 뱉어냄) -> Preview alert rule condition 선택.
+5. Add folder and labels -> 생성한 폴더(Longhorn-Alerts) 선택.
+6. Ser evaluation behavior -> 생성한 펼가 그룹(1m-check) 선택.
+7. Pending period -> 5m (85% 넘은 상태가 5분 동안 지속 시 진짜 알람 발송하도록 설정)
+8. Configure notificaion message -> summary 값은 메일 제목(🚨 경고: {{ $labels.node }} 노드의 디스크 사용량이 85%를 초과했습니다!), Description 값은 메일 본문(현재 디스크 사용량이 위험 수준(85% 초과)에 도달했습니다. 볼륨 용량 증설이나 불필요한 Longhorn 스냅샷 정리가 필요합니다.).
+9. Dashboard and panel -> @ Link dashboard and panel -> Longhorn 검색 -> Node Storage 또는 Storage by Node (각 노드별 전체 용량 중 얼만큼 사용한지 막대그래프나 게이지로 보여줌) / Cluster Storage (클러스터 전체 총 가용 용량 대비 사용량 보여줌) 선택 -> Confirm -> Save.
+
+★ query가 No data 뜨면 데이타 소스 주소 업데이트 해야 함 ★
+1. Connections -> Data sources -> Prometheus 선택.
+2. HTTP 섹션의 URL 칸에 prometheus-monitoring-kube-prometheus-prometheus-0 Pod가 2개 전부 Running 상태인 Pod로 지정해야 No data 방지 가능 -> Save & test.

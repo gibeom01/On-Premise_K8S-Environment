@@ -1,0 +1,141 @@
+# 백업 설정 전용 폴더 생성 및 이동
+
+mkdir velero-setup
+cd velero-setup
+
+# minio-native.yaml 생성
+
+1. cat > minio-native.yaml
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  namespace: velero
+spec:
+  storageClassName: local-path
+  accessModes: [ "ReadWriteOnce" ]
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: velero
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: quay.io/minio/minio:latest
+        command:
+        - /bin/sh
+        - -c
+        - mkdir -p /data/velero-backups && minio server /data --console-address ":9001"
+        env:
+        - name: MINIO_ROOT_USER
+          value: "velero-admin"
+        - name: MINIO_ROOT_PASSWORD
+          value: "VeleroBackupPassword123!"
+        ports:
+        - containerPort: 9000
+        - containerPort: 9001
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: minio-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: velero
+spec:
+  ports:
+  - name: api
+    port: 9000
+    targetPort: 9000
+  - name: console
+    port: 9001
+    targetPort: 9001
+  selector:
+    app: minio
+
+2. kubectl create namespace velero (네임스페이스 생성)
+3. kubectl apply -f minio-native.yaml (MinIO 설치)
+4. kubectl get svc minio -n velero (MinIO CLUSTER-IP 확인 및 메모)
+
+# velero-values.yaml 생성
+
+1. cat > velero-values.yaml
+
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.7.1
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: velero-backups
+      config:
+        region: minio
+        s3ForcePathStyle: true
+        s3Url: http://10.X.X.X:9000 # CLUSTER-IP 변경
+  # 스냅샷 요구조건 에러 방지용 가짜 설정
+  volumeSnapshotLocation:
+    - name: default
+      provider: aws
+      config:
+        region: minio
+
+credentials:
+  useSecret: true
+  secretContents:
+    cloud: |
+      [default]
+      aws_access_key_id=velero-admin
+      aws_secret_access_key=VeleroBackupPassword123!
+
+deployNodeAgent: true
+
+2. helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts (저장소 등록)
+3. helm repo update (repo 최신화)
+4. helm install velero vmware-tanzu/velero -f velero-values.yaml -n velero (Velero 설치)
+5. velero backup-location get (정상 연결 확인 -> PHASE Available이면 연결됨)
+
+# 재해 복구(DR) 시뮬레이션
+
+1. velero backup create dr-test-backup --include-namespaces default (수동 백업)
+2. velero backup get (상태 확인 -> 'Completed' 확인)
+3. kubectl delete pod --all -n default (장애 발생 시뮬레이션)
+4. velero restore create --from-backup dr-test-backup (복구 진행)
+5. velero restore get (상태 확인 -> 'Completed' 확인)
+6. kubectl get pods -n default (파드가 다시 살아났는지 확인)
+
+# 자동화 (스케줄링 등록)
+1. velero schedule create daily-backup --schedule="0 3 * * *" --include-namespaces default (스케줄링 등록)
+2. velero schedule get (등록 확인)
+
+---
+
+추가적으로 확인 명령어
+
+1. velero get snapshot-locations (스냅샷 확인)
+2. velero describe backup my-first-backup (backup 상세 확인)
+3. velero describe restores my-first-backup-20260514072901 (restores 상세 확인)
