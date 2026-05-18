@@ -84,7 +84,7 @@ parameters:
 
 2. kubectl apply -f longhorn-test.yaml
 
-# Longhorn -> Loadblanceer 전환 및 공유 IP 설정
+# 방법 1. Longhorn -> Loadblanceer 전환 및 공유 IP 설정
 1. kubectl patch svc longhorn-frontend -n longhorn-system -p '{
   "metadata": {
     "annotations": {
@@ -95,6 +95,9 @@ parameters:
     "type": "LoadBalancer"
   }
 }'
+
+# 방법 2. NodeProt 변경 (30000~32767 사이의 포트로 모든 노드 IP를 통해 접속 가능)
+1. kubectl patch svc longhorn-frontend -n longhorn-system -p '{"spec": {"type": "NodePort"}}'
 
 2. kubectl get svc longhorn-frontend -n longhorn-system (IP 할당 확인)
 3. 브라우저 -> 221.139.104.187 접속 -> Longhorn 접속 완료
