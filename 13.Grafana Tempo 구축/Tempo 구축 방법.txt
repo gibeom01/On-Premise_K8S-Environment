@@ -1,0 +1,82 @@
+# MinIO 웹 로그인 계정 확인
+1. kubectl get secret velero -n velero -o jsonpath="{.data.cloud}" | base64 --decode ; echo
+
+# 브라우저 MinIO 접속 및 버킷 생성
+1. 221.139.104.182:9001 -> aws_access_key_id, aws_secret_access_key 입력.
+2. Create Bucket 선택 -> tempo-data 이름으로 생성.
+
+# Helm Repo 추가
+1. helm repo add grafana https://grafana.github.io/helm-charts
+2. helm repo update
+
+# values.yaml 작성
+
+1. cat > tempo-values.yaml
+
+tempo:
+  storage:
+    trace:
+      backend: s3 # MinIO를 S3 백엔드로 사용
+      s3:
+        bucket: tempo-data
+        endpoint: minio.velero.svc.cluster.local:9000 # MinIO 서비스 주소로 변경
+        access_key: "velero-admin" # 실제 키 입력
+        secret_key: "VeleroBackupPassword123!" # 실제 키 입력
+        insecure: true # HTTP 통신 시 true
+
+  # 데이터를 받는 포트 활성화 (OpenTelemetry, Jaeger, Zipkin 포맷 모두 지원)
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+    jaeger:
+      protocols:
+        thrift_http:
+          endpoint: "0.0.0.0:14268"
+
+# K8s 클러스터에 배포 및 확인
+1. helm install tempo grafana/tempo -n monitoring -f tempo-values.yaml
+2. kubectl get pods -n monitoring | grep tempo (Pod Runnig 확인)
+3. kubectl get svc tempo -n monitoring (Tempo Port 확인)
+
+# Grafana -> Tempo 연결
+1. Data sources -> Add new data source 선택 -> Tempo 선택.
+2. Name (tempo-1), URL (http://tempo.monitoring.svc.cluster.local:3200) 입력 -> Save & test.
+
+# Dummy Trace 폭격기 활용한 Grafana 분산 추적 그래프 확인 Test
+1. cat <<EOF | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tempo-test-generator
+  namespace: monitoring
+spec:
+  template:
+    spec:
+      containers:
+      - name: telemetrygen
+        image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest
+        args:
+        - traces
+        - --otlp-endpoint=tempo:4317
+        - --otlp-insecure
+        - --rate=5
+        - --duration=1m
+      restartPolicy: Never
+EOF
+
+# Grafana 3D 관제 실행
+1. Grafana -> Explore -> 좌측 상단 데이터 소스 드롭다운에서 Tempo-1 선택.
+2. 쿼리 입력창 상단에 보면 Trace ID와 Search 라는 탭에서 Search 탭 선택 -> Run query 실행.
+
+# 분산 추적 확인
+1. Trace ID 목록 수십 개 중 아무 아무 Trace ID 선택.
+2. lets-go 전체 요청 안에 okey-dokey-0 Span이 μs 단위로 얼마나 걸렸는지 보여주는 Waterfall 차트.
+
+# 실무팁
+* 사내 개발팀 새로운 마이크로서비스 앱(Java, Node.js 등) K8s 클러스터 배포 시, OpenTelemetry(OTel) 에이전트만 코드에 살짝 붙여서 배포하도록 가이드해 주시면 끝. *
+-> 화면의 telemetrygen이라는 더미 이름 대신 auth-service, payment-db 같은 실제 사내 서비스 이름들이 찍히기 시작하고,
+대시보드 보며 "어제 배포된 결제 로직 중 특정 DB 조회 구간에서 3초나 걸리고 있네요. 쿼리 튜닝 확인 부탁드립니다." 하고 핀포인트로 병목 현상 짚을 수 있음.
