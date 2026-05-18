@@ -1,0 +1,89 @@
+# Helm 저장소 추가
+1. helm repo add harbor https://helm.goharbor.io
+2. helm repo update
+
+# harbor-values.yaml 작성
+1. cat > harbor-values.yaml
+
+expose:
+  type: loadBalancer # MetalLB가 IP를 할당하도록 설정
+  tls:
+    enabled: false # 테스트 환경의 편의성을 위해 일단 HTTP로 오픈 (추후 Cert-manager 연동 가능)
+
+externalURL: http://221.139.104.187 # 설치 직후 MetalLB가 부여한 IP로 수정 필요
+
+persistence:
+  persistentVolumeClaim:
+    registry:
+      storageClass: "longhorn"
+      size: 10Gi
+    chartmuseum:
+      storageClass: "longhorn"
+      size: 5Gi
+    jobservice:
+      storageClass: "longhorn"
+      size: 1Gi
+    database:
+      storageClass: "longhorn"
+      size: 5Gi
+    redis:
+      storageClass: "longhorn"
+      size: 1Gi
+    trivy:
+      storageClass: "longhorn"
+      size: 5Gi
+
+trivy:
+  enabled: true # DevSecOps의 핵심! Trivy 스캐너 활성화
+
+# 배포 및 확인
+1. helm install harbor harbor/harbor -n harbor -f harbor-values.yaml
+2. kubectl get pods,svc -n harbor
+
+# 브라우저 접속
+1. kubectl port-forward -n harbor svc/harbor 8080:80 --address 0.0.0.0
+2. 브라우저에 http://221.139.104.182:8080 -> 계정 (admin), 비밀번호 (Harbor12345)
+
+# Ubuntu 환경 기준 도커 퀵 설치 및 확인
+1. sudo apt update
+2. sudo apt install docker.io -y
+3. docker --version
+
+# 로컬에 취약한 이미지 다운로드
+1. docker pull nginx:1.14
+
+# Harbor 주소에 맞게 이름표(Tag) 달기
+1. docker tag nginx:1.14 221.139.104.187/library/nginx:vulnerable
+
+# 도커 HTTP 접속 허용
+1. cat <<EOF | sudo tee /etc/docker/daemon.json
+{
+  "insecure-registries": ["221.139.104.187"]
+}
+EOF
+
+# Harbor에 도커 로그인
+1. docker login 221.139.104.187
+
+# 취약한 이미지 Push
+1. docker push 221.139.104.187/library/nginx:vulnerable
+
+# Harbor 웹 UI 에서 Trivy 스캔 결과 확인
+1. 왼쪽 메뉴에서 Projects(프로젝트) ➔ library ➔ Repositories(저장소) 선택.
+2. nginx 선택 -> Vulnerabilities -> Not Scanned(스캔 안 됨) 시 -> 체크박스 선택 후 SCAN(스캔) 버튼 수동 선택.
+3. 화면이 빨간색(Critical), 주황색(High), 노란색(Medium) 막대그래프 표시됨.
+
+★ 취약점 배포 차단 ★
+1. 해당 프로젝트 선택 -> 설정 -> 취약한 이미지가 실행되지 않도록 방지합니다. (Prevent vulnerable images from running) 선택.
+2. 드롭다운 메뉴 -> High (높음) 또는 Critical (치명적) 선택 -> 저장 (Save).
+3. library 프로젝트 안에서는 Trivy가 스캔했을 때 'High' 이상의 취약점이 발견된 이미지는 쿠버네티스에서 절대 Pull해 갈 수 없게 강력하게 차단.
+
+---
+
+문제해결
+
+1. kubectl logs -n harbor -l component=registry --tail=50 (Registry(저장소) 컨테이너 로그 확인)
+2. kubectl logs -n harbor -l component=core --tail=50 (Core(핵심 API) 컨테이너 로그 확인)
+3. kubectl logs -n harbor -l component=trivy --tail=50 (Trivy (보안 스캐너) 로그 확인)
+4. kubectl logs -n harbor -l component=jobservice --tail=50 (Jobservice (스캔 작업 관리자) 로그 확인)
+5. kubectl delete pods --all -n harbor -> 다시 취약점 스캔
