@@ -111,6 +111,10 @@ parameters:
 문제 3: Node NotReady -> 원인: 네트워크 충돌 / Kubelet 중지 -> 해결: systemctl restart kubelet, containerd, ARP 캐시 초기화.
 문제 4: UI 접속 불가/Pending -> 원인: IP 충돌 (VIP 등) -> 해결: 사용 중인 IP 제외 후 MetalLB Pool 재설정.
 
+# 그라파나 로그 확인
+
+1. kubectl logs -n monitoring deployment/monitoring-grafana -c grafana --tail=100 | grep -i "alert"
+
 # 문제 2의 ARP 캐시 초기화 방법 (문제의 노드에서 진행)
 
 1. sudo ip neigh del 221.139.104.184 dev ens160 (184번 VIP에 대한 잘못된 캐시 정보 삭제)
