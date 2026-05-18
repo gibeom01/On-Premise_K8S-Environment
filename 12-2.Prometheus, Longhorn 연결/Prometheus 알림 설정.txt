@@ -70,7 +70,7 @@ grafana:
 
 # 디스크 85% 초과 예방 알람 만들기
 1. Alerting -> Alert rules에 New alert rule 선택 -> Rule name(Longhorn-Node-Storage-85-Warning) 입력.
-2. Define query and alert condition에 Prometheus 선택.
+2. Define query and alert condition에 Prometheus 선택. (★ query는 prometheus-monitoring-kube-prometheus-prometheus-0 Pod가 2개 전부 Running 상태인 Pod로 지정해야 No data 방지 가능 ★)
 3. Code 선택 -> 값은 (longhorn_node_storage_usage_bytes / longhorn_node_storage_capacity_bytes) * 100
 4. Alert condition 값은 85 (Prometheus 아무 대답 없다가 설정 값 넘는 순간 데이터 뱉어냄) -> Preview alert rule condition 선택.
 5. Add folder and labels -> 생성한 폴더(Longhorn-Alerts) 선택.
