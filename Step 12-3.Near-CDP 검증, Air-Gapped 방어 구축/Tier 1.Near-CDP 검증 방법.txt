@@ -1,0 +1,103 @@
+Tier 1. K8s 내부 스냅샷 (Near-CDP) -> 15분~1시간 단위의 일상적인 복구를 담당하는 1차 방어선.
+
+---
+
+# Tier 1. K8s 내부 스냅샷 (Near-CDP) 구축 방법
+
+## Step 1. Longhorn에게 MinIO 열쇠(자격 증명) 쥐여주기 -> Longhorn MinIO에 접근할 수 있도록 ID, PW, 주소 K8s Secret으로 만들어 longhorn-system 네임스페이스에 배포.
+
+1. cat > minio-secret.yaml
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-backup-secret
+  namespace: longhorn-system
+type: Opaque
+stringData:
+  # 💡 구축하신 MinIO의 실제 Access Key와 Secret Key를 입력합니다.
+  AWS_ACCESS_KEY_ID: velero-admin
+  AWS_SECRET_ACCESS_KEY: VeleroBackupPassword123!
+  # 💡 MinIO 서버의 엔드포인트 주소 (S3 호환 API 포트인 9000번)
+  AWS_ENDPOINTS: "http://minio.velero.svc.cluster.local:9000"
+
+2. kubectl apply -f minio-secret.yaml
+
+## Step 2. Longhorn Backup Target (백업 목적지) 설정 -> 로컬 스냅샷만 찍지 말고 외부 스토리지로 내보내라를 코드로 강제 설정.
+
+1. cat > longhorn-backup-target.yaml
+
+apiVersion: longhorn.io/v1beta2
+kind: BackupTarget
+metadata:
+  # 💡 새로운 방식에서는 이름을 'default'로 지정합니다.
+  name: default
+  namespace: longhorn-system
+spec:
+  # 💡 spec 하위에 직관적으로 URL과 Secret을 넣습니다.
+  backupTargetURL: "s3://k8s-backup@us-east-1/"	# 💡 MinIO에 생성해둔 버킷 이름(k8s-backup) 지정
+  credentialSecret: "minio-backup-secret"			# 💡 Step 1에서 만든 Secret 이름 연결
+  # 💡 MinIO와 동기화하는 주기 (300초 = 5분)
+  pollInterval: 300s
+
+2. kubectl apply -f longhorn-backup-target.yaml
+
+## Step 3. Near-CDP 구현 (15분 단위 스케줄러) -> Longhorn의 RecurringJob CRD 사용해 "15분마다 로컬 스냅샷 찍고, 1시간마다 MinIO 백업본 쏴라"는 정책.
+
+1. cat > near-cdp-jobs.yaml
+
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: cdp-snapshot-15m
+  namespace: longhorn-system
+spec:
+  cron: "*/15 * * * *"    # 매 15분마다 실행
+  task: "snapshot"        # 로컬(빠른) 스냅샷 찍기
+  groups:
+    - default             # 이 정책을 'default' 그룹에 할당
+  retain: 4               # 최근 4개(1시간 분량)의 로컬 스냅샷만 유지
+  concurrency: 2          # 디스크 I/O 부하를 막기 위해 동시 작업 수 2개로 제한
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: cdp-backup-1h
+  namespace: longhorn-system
+spec:
+  cron: "0 * * * *"       # 매 1시간 정각마다 실행
+  task: "backup"          # MinIO 외부 원격 서버로 전송!
+  groups:
+    - default
+  retain: 24              # 최근 24개(하루치)의 원격 백업본 유지
+  concurrency: 2
+
+2. kubectl apply -f near-cdp-jobs.yaml
+
+## Step 4. CSI Snapshotter CRD 및 컨트롤러 설치 -> K8s는 기본 상태에서 CSI Snapshot 내장하고 있지 않아 설치.
+
+### 스냅샷 CRD(Custom Resource Definition) 설치
+1. kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+2. kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+3. kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+
+### 스냅샷 컨트롤러 및 RBAC 설치
+1. kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml
+2. kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml
+3. kubectl get pods -n kube-system | grep snapshot-controller (컨트롤러 정상 작동 확인)
+
+## Step 5. Velero 연동을 위한 SnapshotClass 설정 -> Velero가 Longhorn의 CSI 스냅샷 제어할 수 있게 하는 설정.
+
+1. cat > volume-snapshot-class.yaml
+
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: longhorn-snapshot-class
+  labels:
+    # 💡 Velero가 이 스토리지 클래스를 자동으로 찾아서 백업에 사용하도록 지시하는 핵심 라벨
+    velero.io/csi-volumesnapshot-class: "true" 
+driver: driver.longhorn.io
+deletionPolicy: Retain    # 원본 PVC가 삭제되어도 스냅샷은 보존(Retain)
+
+2. kubectl apply -f volume-snapshot-class.yaml

@@ -1,0 +1,33 @@
+Tier 3. 물리적 오프라인 보관 -> 전산실 화재, 제로데이 취약점 등 모든 IT 시스템이 붕괴했을 때 대비한 최후의 보루.
+-> 1주일, 1달 한 번씩 Tier 2 백업 서버에 외장하드, 테이프 꽂아 데이터 복사 후 보관
+
+---
+
+# Tier 3. 물리적 오프라인 보관
+
+## Step 1. 오프라인 백업 도우미 스크립트 작성 -> 외장 디스크 서버 랙에 꽂고 스크립트만 실행하면 복사 후 자동 마운트 해제까지 해주는 코드.
+
+cat > /root/offline_usb_backup.sh
+
+#!/bin/bash
+
+MOUNT_POINT="/mnt/external_usb"
+# 방법 2에서 Pull 해온 안전지대 데이터 경로
+SOURCE_DATA="/mnt/data/k8s-locked-backup/" 
+
+# 1. 외장 매체 마운트 확인
+if mountpoint -q $MOUNT_POINT; then
+    echo "🚨 외장 드라이브 인식 완료. 오프라인 백업을 시작합니다..."
+    
+    # 2. 데이터 고속 복사 (오늘 날짜로 폴더 생성)
+    rsync -avh --progress $SOURCE_DATA $MOUNT_POINT/$(date +%Y-%m-%d_Backup)/
+    
+    # 3. 디스크 캐시 비우기 및 안전한 마운트 해제
+    sync
+    umount $MOUNT_POINT
+    
+    echo "✅ 복사 완료 및 마운트 해제 완료!"
+    echo "⚠️ [중요] 지금 즉시 서버 랙에서 USB/디스크 케이블을 물리적으로 분리하십시오!"
+else
+    echo "❌ 외장 드라이브가 마운트되지 않았습니다. 케이블 연결을 확인하세요."
+fi

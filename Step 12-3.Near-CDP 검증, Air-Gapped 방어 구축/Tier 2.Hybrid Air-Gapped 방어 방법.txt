@@ -1,0 +1,91 @@
+Tier 2. 하이브리드 에어갭 -> 랜섬웨어 및 K8s 마스터 노드 해킹을 방어하는 2차 철금고.
+
+tip.  Tier 2 담당하는 독립된 백업 서버의 OS 접근 권한 극도로 제한해야 함.
+-> 일반적인 사내망, SSH 접근하게 두지 말고,
+-> 서버 섀시의 Dell iDRAC, HPE iLO 등 통해 OOB 폐쇄망으로만 접근하여 통제하도록 설계.
+
+---
+
+# Tier 2. 하이브리드 Air-Gapped 구축 방법
+
+## Step 1.
+
+### MinIO 서버 바이너리 설치
+1. wget https://dl.min.io/server/minio/release/linux-amd64/minio
+2. chmod +x minio
+3. sudo mv minio /usr/local/bin/
+
+### MinIO 클라이언트(mc) 설치
+1. wget https://dl.min.io/client/mc/release/linux-amd64/mc
+2. chmod +x mc
+3. sudo mv mc /usr/local/bin/
+
+## Step 2. 준비 사항: K8s 클러스터와 완전히 분리된 물리 서버(또는 VM)에 MinIO를 설치하고 실행할 때, 반드시 오브젝트 잠금 기능을 켜야 함.
+
+1. export MINIO_ROOT_USER=backup_admin
+2. export MINIO_ROOT_PASSWORD=super_secure_password
+3. nohup minio server /mnt/data --console-address ":9001" > /var/log/minio.log 2>&1 & (nohup 명령어 붙여 터미널을 꺼도 프로세스가 죽지 않고 계속 살아있게 함, --console-address 옵션과 함께 백업 데몬을 백그라운드로 실행)
+
+## Step 3. 잠금 버킷 생성 및 정책 강제 코드 (WORM 설정)
+
+1. mc alias set airgap-minio http://221.139.104.182:9000 backup_admin super_secure_password (방금 띄운 독립형 백업 서버 mc 등록)
+2. mc mb --with-lock airgap-minio/hybrid-airgap-backup (Object Lock 기능이 켜진 특수 버킷 생성)
+3. mc retention set --default compliance 30d airgap-minio/hybrid-airgap-backup (Compliance 모드로 30일간 보존 -> 이 명령어가 들어간 순간부터 Root 관리자조차 30일 내에는 절대 백업본 지울 수 없음.)
+4. mc retention info airgap-minio/hybrid-airgap-backup (설정 확인)
+
+## Step 4. 네트워크 단절 (K8s 워커/마스터 노드에서 실행)
+
+1. sudo ufw deny out to 221.139.104.182 (UFW 방화벽을 사용할 경우 실행)
+2. sudo ufw reload
+
+## Step 5. 백업 서버 중심의 자동 Pull 스크립트 작성 -> 독립된 백업 서버에서 K8s 내부 MinIO로 접속해 데이터 복제해 오는 쉘 스크립트 작성.
+
+1. cat > /usr/local/bin/secure_pull_backup.sh
+
+#!/bin/bash
+
+# 1. 환경 변수 및 경로 명시 (Cronjob 에러 방지)
+MC_CMD="/usr/local/bin/mc"
+K8S_INTERNAL_MINIO="http://221.139.104.182:31900" # K8s 워커 노드의 IP와 '9000의 노드포트 31900 (API)' 포트 사용
+WORM_BUCKET="airgap-minio/hybrid-airgap-backup"
+SLACK_WEBHOOK_URL="https://hooks.slack.com/services/?"
+
+echo "=== K8s 하이브리드 에어갭 백업 시작: $(date) ==="
+
+# 2. 데이터 원본(K8s 내부) 접근 권한 획득
+# (Cron 백그라운드 환경에서는 매번 alias를 갱신해 주어야 합니다)
+$MC_CMD alias set k8s-internal-minio $K8S_INTERNAL_MINIO velero-admin VeleroBackupPassword123! # K8s 내부 접속 위해 MinIO UI 접속 'velero-admin' 계정 사용
+
+# 임시 데이터를 받을 로컬 폴더를 무조건 생성하도록 강제 명령 추가
+mkdir -p /mnt/local_temp_backup/
+
+# 3. 데이터 Pull & Push (하이브리드 로직)
+echo "-> [1/3] K8s 내부에서 로컬 임시 폴더로 데이터 Pull"
+$MC_CMD mirror k8s-internal-minio/k8s-backup /mnt/local_temp_backup/
+# 첫 번째 중요 작업의 결과를 변수에 저장
+PULL_STATUS=$?
+
+echo "-> [2/3] 로컬 데이터를 WORM 철금고 버킷으로 Push"
+$MC_CMD mirror /mnt/local_temp_backup/ $WORM_BUCKET
+# 두 번째 중요 작업의 결과를 변수에 저장
+PUSH_STATUS=$?
+
+echo "-> [3/3] 보안을 위한 로컬 임시 데이터 영구 삭제"
+rm -rf /mnt/local_temp_backup/*
+
+# 4. 성공 여부 판별 및 알람 발송: Pull과 Push가 모두 0(성공)이어야만 최종 성공으로 간주
+if [ $PULL_STATUS -eq 0 ] && [ $PUSH_STATUS -eq 0 ]; then
+    echo "=== 백업 성공 ==="
+    curl -X POST -H 'Content-type: application/json' \
+    --data '{"text":"✅ [성공] K8s 하이브리드 에어갭 백업이 안전하게 WORM 스토리지에 저장되었습니다."}' \
+    $SLACK_WEBHOOK_URL
+else
+    echo "=== 백업 실패 ==="
+    curl -X POST -H 'Content-type: application/json' \
+    --data '{"text":"🚨 [장애] K8s 에어갭 백업 프로세스 중 오류가 발생했습니다. 백업 서버 로그를 확인하세요!"}' \
+    $SLACK_WEBHOOK_URL
+fi
+
+2. chmod +x /usr/local/bin/secure_pull_backup.sh
+3. 독립된 백업 서버에서 crontab -e 입력
+4. 0 3 * * * /usr/local/bin/secure_pull_backup.sh >> /var/log/secure_pull_backup.log 2>&1 (Cronjob 등록, 매일 새벽 3시 K8s 클러스터에서 백업본 Pull)
